@@ -217,7 +217,9 @@ the default `test` script stays fast and offline.
 
 1. Copy `.env.example` to `.env` and fill in provider keys / `DATABASE_URL`.
 2. `docker compose up -d` to start Postgres (with PGVector) and Ollama.
-3. `npm run dev` to boot the server with hot reload.
+3. `npm run dev` runs the current entrypoint, `src/app/main.ts` — see
+   "Sprint S1" below for what that verifies today. The enterprise `app/server.ts`
+   HTTP server is scaffolded but not yet implemented.
 4. `npm run typecheck` and `npm test` before opening a PR.
 
 ## Naming Conventions
@@ -244,6 +246,94 @@ constructor parameters (no service-locator globals), strict TypeScript
   re-exported from its `index.ts`.
 - New business domains get their own `modules/<name>/` folder rather than
   growing an existing one to cover unrelated concerns.
+
+## Sprint S1 — LLM/DB Connection Verification (`src/`)
+
+Before any RAG or business logic, Sprint S1 verifies the raw plumbing works:
+environment loading, a real PostgreSQL connection, a Gemini-primary /
+Ollama-fallback chat call, and a local embedding call — all from the terminal.
+This lives in `src/` (separate from the `app/`/`ai/`/`modules/` enterprise
+scaffold above, which isn't wired up yet) and is intentionally flat: no RAG,
+no agents, no multi-step chains.
+
+**Folders**: `src/config` (env loading), `src/database` (Postgres), `src/models`
+(Gemini, Ollama, and the factory that picks between them), `src/embeddings`
+(local embedding call), `src/services` (the one-shot prompt send), `src/utils`
+(console logger), `src/app` (bootstrap + entrypoint).
+
+### Installation
+
+```bash
+npm install
+cp .env.example .env   # then fill in the values below
+```
+
+### Dependencies
+
+`@langchain/core`, `@langchain/google-genai` (Gemini), `@langchain/ollama`
+(chat + embeddings), `pg` (PostgreSQL driver), `dotenv`. All already declared
+in `package.json`.
+
+### Environment Variables
+
+| Variable                  | Required | Purpose                                    |
+|----------------------------|----------|---------------------------------------------|
+| `DATABASE_URL`             | yes      | PostgreSQL connection string (`test_series_db`) |
+| `GEMINI_API_KEY`           | no       | Primary provider; if unset, goes straight to Ollama |
+| `OLLAMA_BASE_URL`          | no       | Default `http://localhost:11434`            |
+| `OLLAMA_CHAT_MODEL`        | no       | Default `qwen3:8b`                          |
+| `OLLAMA_EMBEDDING_MODEL`   | no       | Default `embeddinggemma:latest`             |
+
+### How to run
+
+```bash
+npm run dev
+```
+
+Runs `src/app/main.ts`: loads env, connects to Postgres, picks a chat model,
+loads the embedding model, sends one prompt, prints the response, exits.
+
+### How fallback works
+
+`src/models/llm.factory.ts` sends a cheap probe message (`"Reply with OK."`)
+to Gemini first. If `GEMINI_API_KEY` is missing, or the call fails with a
+signal that means the provider is down — `429`, `503`, `quota`, `rate limit`,
+`RESOURCE_EXHAUSTED`, `unavailable`, or a network error — it logs the reason
+and falls back to `ChatOllama` (`qwen3:8b`) instead of crashing. Any other
+kind of error (e.g. a malformed request) is rethrown rather than masked.
+
+### How PostgreSQL connects
+
+`src/database/postgres.ts` holds a single lazily-created `pg.Pool`, built from
+`DATABASE_URL`. `testConnection()` runs `SELECT NOW()` and throws if it gets
+back no rows or the connection fails — there's no silent fallback for the
+database, since ingestion later needs it to be real.
+
+### How Ollama connects
+
+`src/models/ollama.ts` builds a `ChatOllama` against `OLLAMA_BASE_URL` /
+`OLLAMA_CHAT_MODEL`. `src/embeddings/embedding.ts` builds an `OllamaEmbeddings`
+against the same base URL with `OLLAMA_EMBEDDING_MODEL`, embeds a sample
+string, and prints the resulting vector length.
+
+### How Gemini connects
+
+`src/models/gemini.ts` builds a `ChatGoogleGenerativeAI` (`gemini-2.5-flash`)
+with `apiKey` passed explicitly from `GEMINI_API_KEY`, rather than relying on
+the SDK's default `GOOGLE_API_KEY` env lookup.
+
+### Troubleshooting
+
+- **`password authentication failed`** — `DATABASE_URL` credentials don't
+  match your local Postgres; this is a hard failure by design, not a bug.
+- **Gemini call hangs or errors oddly** — check `GEMINI_API_KEY` is set and
+  valid; if you'd rather always skip it, leave the variable empty.
+- **Ollama errors ("model not found")** — run `ollama pull qwen3:8b` and
+  `ollama pull embeddinggemma:latest`, and confirm `ollama serve` is running
+  on `OLLAMA_BASE_URL`.
+- **Process doesn't exit** — `main.ts` calls `process.exit(0)` after the
+  prompt completes; if you removed that, an open `pg.Pool` will keep the
+  event loop alive.
 
 ## Future Improvements
 

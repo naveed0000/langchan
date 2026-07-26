@@ -23,6 +23,6 @@
       "@shared/*": ["shared/*"]
     }
   },
-  "include": ["app", "ai", "database", "modules", "shared", "tests", "scripts"],
+  "include": ["app", "ai", "database", "modules", "shared", "tests", "scripts", "src"],
   "exclude": ["node_modules", "dist", "storage"]
 }
