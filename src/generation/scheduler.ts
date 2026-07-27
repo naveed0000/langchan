@@ -1,5 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import type { Env } from "../config/env";
+import { LLM_MODELS } from "../config/llm";
+import { normalizeModelId } from "../models/registry";
 import { selectChatModel } from "../models/llm.factory";
 import { createInitialState, readState, writeState } from "../state";
 import { logCheckpoint, logWorkerStatus } from "../logging";
@@ -45,6 +47,11 @@ export async function runGenerationCycle(
   const { config } = await prepareInitialConfig(env);
   const selected = await selectChatModel(env);
 
+  // Everything after the selected model in LLM_MODELS is its fallback chain,
+  // so a mid-batch failure walks the same list the user configured.
+  const chain = LLM_MODELS.map(normalizeModelId);
+  const fallbackIds = chain.slice(chain.indexOf(selected.id) + 1);
+
   const existingState = await readState();
   const state =
     existingState ??
@@ -52,7 +59,7 @@ export async function runGenerationCycle(
       totalQuestions: config.generationconfig.totalquestions,
       totalApiCalls: config.generationconfig.totalapicalls,
       parallelWorkers: 5,
-      provider: { current: selected.provider, model: selected.modelName, fallback: "Ollama qwen3:8b" },
+      provider: { current: selected.provider, model: selected.modelName, fallback: fallbackIds.join(", ") || "none" },
     });
   state.status = "RUNNING";
   await writeState(state);
@@ -109,6 +116,7 @@ export async function runGenerationCycle(
         model: selected.model,
         provider: selected.provider,
         modelName: selected.modelName,
+        fallbackIds,
         context,
         currentState: state,
       }).then(async (result) => {

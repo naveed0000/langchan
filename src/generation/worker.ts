@@ -1,6 +1,6 @@
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { Env } from "../config/env";
-import { createOllamaModel } from "../models/ollama";
+import { MODEL_REGISTRY } from "../models/registry";
 import { isProviderUnavailable } from "../models/llm.factory";
 import { generateQuestionBatch } from "./generate-batch";
 import type { BatchContext } from "./prompt-builder";
@@ -15,8 +15,10 @@ export interface WorkerInput {
   batchId: string;
   executionId: string;
   model: BaseChatModel;
-  provider: "Gemini" | "Ollama";
+  provider: string;
   modelName: string;
+  /** Registry ids to fall back to, in order, when the current model is unavailable. */
+  fallbackIds: string[];
   context: BatchContext;
   currentState: ExecutionState;
 }
@@ -58,14 +60,16 @@ function describeError(error: unknown): { type: string; message: string; stack?:
 
 /**
  * Runs one batch to completion: generate -> validate -> log. Retries up to
- * MAX_ATTEMPTS with exponential backoff, switching Gemini -> Ollama mid-loop
- * if a retryable provider-unavailable error shows up (docs/QnA-sprint-s2.md
- * items 5 & 6 — the worker stays generic, no scheduling/traversal logic here).
+ * MAX_ATTEMPTS with exponential backoff, walking input.fallbackIds (the rest
+ * of LLM_MODELS after the selected one) whenever a retryable provider-
+ * unavailable error shows up (docs/QnA-sprint-s2.md items 5 & 6 — the worker
+ * stays generic, no scheduling/traversal logic here).
  */
 export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> {
   let model = input.model;
   let provider = input.provider;
   let modelName = input.modelName;
+  const fallbacks = [...input.fallbackIds];
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
@@ -128,6 +132,12 @@ export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> 
         return { batchId: input.batchId, success: false, questions: [] };
       }
 
+      // Resolve the next model in the LLM_MODELS chain, skipping any unknown ids.
+      let next: { provider: string; modelName: string; model: BaseChatModel } | undefined;
+      while (retryable && !next && fallbacks.length > 0) {
+        next = MODEL_REGISTRY[fallbacks.shift()!]?.(input.env);
+      }
+
       await logRetry({
         executionId: input.executionId,
         batchId: input.batchId,
@@ -137,21 +147,21 @@ export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> 
         strategy: "ExponentialBackoff",
         wait: nextRetryAfter,
         provider,
-        fallback: false,
+        fallback: next !== undefined,
       });
 
-      if (retryable && provider === "Gemini") {
+      if (next) {
         await logProviderSwitch({
           executionId: input.executionId,
           currentState: input.currentState,
           from: { provider, model: modelName },
-          to: { provider: "Ollama", model: input.env.OLLAMA_CHAT_MODEL },
+          to: { provider: next.provider, model: next.modelName },
           reason: "Quota/availability failure",
           batchId: input.batchId,
         });
-        model = createOllamaModel(input.env);
-        provider = "Ollama";
-        modelName = input.env.OLLAMA_CHAT_MODEL;
+        model = next.model;
+        provider = next.provider;
+        modelName = next.modelName;
       }
 
       await new Promise((resolve) => setTimeout(resolve, nextRetryAfter));

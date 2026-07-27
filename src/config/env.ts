@@ -2,6 +2,7 @@ import "dotenv/config";
 
 export interface Env {
   GEMINI_API_KEY?: string;
+  OPENAI_API_KEY?: string;
   OLLAMA_BASE_URL: string;
   OLLAMA_CHAT_MODEL: string;
   OLLAMA_EMBEDDING_MODEL: string;
@@ -23,6 +24,10 @@ export function loadEnv(): Env {
 
   if (process.env.GEMINI_API_KEY) {
     env.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+  }
+
+  if (process.env.OPENAI_API_KEY) {
+    env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   }
 
   return env;

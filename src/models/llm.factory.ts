@@ -1,14 +1,15 @@
 import { HumanMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { Env } from "../config/env";
-import { createGeminiModel } from "./gemini";
-import { createOllamaModel } from "./ollama";
-import { logSuccess, logWarn, logInfo } from "../utils/logger";
+import { LLM_MODELS } from "../config/llm";
+import { MODEL_REGISTRY, normalizeModelId } from "./registry";
+import { logSuccess, logWarn } from "../utils/logger";
 
 export interface SelectedModel {
   model: BaseChatModel;
-  providerLabel: string;
-  provider: "Gemini" | "Ollama";
+  /** Normalized registry id of the chosen model — lets the worker walk the rest of the list. */
+  id: string;
+  provider: string;
   modelName: string;
 }
 
@@ -30,41 +31,34 @@ export function isProviderUnavailable(error: unknown): boolean {
 }
 
 /**
- * Tries Gemini first with a cheap probe call; falls back to Ollama qwen3:8b
- * on quota/rate-limit/network/availability failures so the app never crashes
- * because a single provider is down.
+ * Walks the LLM_MODELS list (config/llm.ts) in order and returns the first one
+ * that answers a cheap probe call. Unknown ids and providers that are down
+ * (quota/rate-limit/network/missing-key) are skipped so the run uses whichever
+ * of your chosen models is reachable. One entry or many — same path.
  */
-export async function selectChatModel(env: Env): Promise<SelectedModel> {
-  if (!env.GEMINI_API_KEY) {
-    logWarn("Gemini unavailable (missing GEMINI_API_KEY)");
-    logInfo("Switching to Ollama...");
-    return connectToOllama(env);
-  }
+export async function selectChatModel(env: Env, models: string[] = LLM_MODELS): Promise<SelectedModel> {
+  const probe = new HumanMessage("Reply with OK.");
 
-  const gemini = createGeminiModel(env);
-  try {
-    await gemini.invoke([new HumanMessage("Reply with OK.")]);
-    logSuccess("Gemini Initialized");
-    return { model: gemini, providerLabel: "Gemini 2.5", provider: "Gemini", modelName: "gemini-2.5-flash" };
-  } catch (error) {
-    if (!isProviderUnavailable(error)) {
-      throw error;
+  for (const rawId of models) {
+    const id = normalizeModelId(rawId);
+    const factory = MODEL_REGISTRY[id];
+    if (!factory) {
+      logWarn(`Unknown LLM "${rawId}" in LLM_MODELS — skipping`);
+      continue;
     }
-    logWarn("Gemini unavailable");
-    logInfo("Switching to Ollama...");
-    return connectToOllama(env);
-  }
-}
 
-async function connectToOllama(env: Env): Promise<SelectedModel> {
-  const ollama = createOllamaModel(env);
-  await ollama.invoke([new HumanMessage("Reply with OK.")]);
-  logSuccess("Ollama Connected");
-  logInfo(`Using ${env.OLLAMA_CHAT_MODEL}`);
-  return {
-    model: ollama,
-    providerLabel: `Ollama ${env.OLLAMA_CHAT_MODEL}`,
-    provider: "Ollama",
-    modelName: env.OLLAMA_CHAT_MODEL,
-  };
+    const { provider, modelName, model } = factory(env);
+    try {
+      await model.invoke([probe]);
+      logSuccess(`${provider} ready (${modelName})`);
+      return { model, id, provider, modelName };
+    } catch (error) {
+      if (!isProviderUnavailable(error)) {
+        throw error;
+      }
+      logWarn(`${provider} unavailable (${modelName}) — trying next`);
+    }
+  }
+
+  throw new Error(`No usable LLM. Tried: ${models.join(", ") || "(empty LLM_MODELS)"}`);
 }
