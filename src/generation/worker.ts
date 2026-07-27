@@ -5,7 +5,7 @@ import { isProviderUnavailable } from "../models/llm.factory";
 import { generateQuestionBatch } from "./generate-batch";
 import type { BatchContext } from "./prompt-builder";
 import type { GeneratedQuestion } from "./question-schema";
-import { logApiCall, logError, logRetry, logProviderSwitch, logValidation, type ValidationChecks } from "../logging";
+import { logger, type ValidationChecks } from "../logger/logger";
 import type { ExecutionState } from "../state/types";
 import { generateId } from "../utils/ids";
 
@@ -77,7 +77,7 @@ export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> 
       const questions = await generateQuestionBatch(model, input.context);
       const latencyMs = Date.now() - startedAt;
 
-      await logApiCall({
+      logger.api({
         executionId: input.executionId,
         workerId: input.workerId,
         batchId: input.batchId,
@@ -99,7 +99,7 @@ export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> 
       });
 
       const { checks, passed } = validateBatch(questions, input.context);
-      await logValidation({
+      logger.validation({
         executionId: input.executionId,
         questionId: generateId("Q"),
         batchId: input.batchId,
@@ -115,7 +115,7 @@ export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> 
       const nextRetryAfter = 2 ** attempt * 1000;
       const isFinalAttempt = attempt >= MAX_ATTEMPTS;
 
-      await logError({
+      logger.error({
         executionId: input.executionId,
         workerId: input.workerId,
         batchId: input.batchId,
@@ -138,7 +138,7 @@ export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> 
         next = MODEL_REGISTRY[fallbacks.shift()!]?.(input.env);
       }
 
-      await logRetry({
+      logger.retry({
         executionId: input.executionId,
         batchId: input.batchId,
         attempt,
@@ -151,7 +151,7 @@ export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> 
       });
 
       if (next) {
-        await logProviderSwitch({
+        logger.provider({
           executionId: input.executionId,
           currentState: input.currentState,
           from: { provider, model: modelName },

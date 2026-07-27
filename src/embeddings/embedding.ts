@@ -1,6 +1,6 @@
 import { OllamaEmbeddings } from "@langchain/ollama";
 import type { Env } from "../config/env";
-import { logSuccess, logInfo } from "../utils/logger";
+import { logger } from "../logger/logger";
 
 export async function loadEmbeddingDimensions(env: Env): Promise<number> {
   const embeddings = new OllamaEmbeddings({
@@ -9,7 +9,7 @@ export async function loadEmbeddingDimensions(env: Env): Promise<number> {
   });
 
   const vector = await embeddings.embedQuery("Sample text for embedding dimension check.");
-  logSuccess("Embedding Model Loaded");
-  logInfo(`Embedding dimensions: ${vector.length}`);
+  logger.success("Embedding Model Loaded");
+  logger.info(`Embedding dimensions: ${vector.length}`);
   return vector.length;
 }

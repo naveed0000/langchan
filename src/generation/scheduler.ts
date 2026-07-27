@@ -4,7 +4,7 @@ import { LLM_MODELS } from "../config/llm";
 import { normalizeModelId } from "../models/registry";
 import { selectChatModel } from "../models/llm.factory";
 import { createInitialState, readState, writeState } from "../state";
-import { logCheckpoint, logWorkerStatus } from "../logging";
+import { logger } from "../logger/logger";
 import { generateId } from "../utils/ids";
 import { prepareInitialConfig } from "./prepare-config";
 import { writeInitialConfig } from "./config-store";
@@ -120,7 +120,7 @@ export async function runGenerationCycle(
         context,
         currentState: state,
       }).then(async (result) => {
-        await logWorkerStatus({
+        logger.worker({
           executionId: state.executionId,
           workerId,
           status: result.success ? "Idle" : "Failed",
@@ -159,7 +159,7 @@ export async function runGenerationCycle(
       await writeInitialConfig(config);
       await writeState(state);
 
-      await logCheckpoint({
+      logger.checkpoint({
         checkpointId: generateId("CP"),
         executionId: state.executionId,
         batchId: result.batchId,

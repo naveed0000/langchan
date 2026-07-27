@@ -1,6 +1,6 @@
 import { loadEnv } from "../config/env";
 import { runGenerationCycle } from "../generation/scheduler";
-import { logInfo, logSuccess } from "../utils/logger";
+import { logger } from "../logger/logger";
 
 /**
  * Entrypoint for the question-generation pipeline (Sprint S2). Separate from
@@ -14,10 +14,10 @@ async function main(): Promise<void> {
   const maxBatchesArg = process.argv.find((arg) => arg.startsWith("--max-batches="));
   const maxBatches = maxBatchesArg ? Number(maxBatchesArg.split("=")[1]) : undefined;
 
-  logInfo(`Starting generation cycle${maxBatches ? ` (max ${maxBatches} batches)` : ""}...`);
+  logger.info(`Starting generation cycle${maxBatches ? ` (max ${maxBatches} batches)` : ""}...`);
   const summary = await runGenerationCycle(env, maxBatches ? { maxBatches } : {});
 
-  logSuccess(
+  logger.success(
     `Attempted ${summary.batchesAttempted} batches, ${summary.batchesSucceeded} succeeded, ` +
       `${summary.questionsGenerated} questions generated. Plan completed: ${summary.planCompleted}`,
   );

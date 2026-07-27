@@ -3,7 +3,7 @@ import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import type { Env } from "../config/env";
 import { LLM_MODELS } from "../config/llm";
 import { MODEL_REGISTRY, normalizeModelId } from "./registry";
-import { logSuccess, logWarn } from "../utils/logger";
+import { logger } from "../logger/logger";
 
 export interface SelectedModel {
   model: BaseChatModel;
@@ -43,20 +43,20 @@ export async function selectChatModel(env: Env, models: string[] = LLM_MODELS): 
     const id = normalizeModelId(rawId);
     const factory = MODEL_REGISTRY[id];
     if (!factory) {
-      logWarn(`Unknown LLM "${rawId}" in LLM_MODELS — skipping`);
+      logger.warn(`Unknown LLM "${rawId}" in LLM_MODELS — skipping`);
       continue;
     }
 
     const { provider, modelName, model } = factory(env);
     try {
       await model.invoke([probe]);
-      logSuccess(`${provider} ready (${modelName})`);
+      logger.success(`${provider} ready (${modelName})`);
       return { model, id, provider, modelName };
     } catch (error) {
       if (!isProviderUnavailable(error)) {
         throw error;
       }
-      logWarn(`${provider} unavailable (${modelName}) — trying next`);
+      logger.warn(`${provider} unavailable (${modelName}) — trying next`);
     }
   }
 
