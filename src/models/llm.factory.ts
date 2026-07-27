@@ -8,6 +8,8 @@ import { logSuccess, logWarn, logInfo } from "../utils/logger";
 export interface SelectedModel {
   model: BaseChatModel;
   providerLabel: string;
+  provider: "Gemini" | "Ollama";
+  modelName: string;
 }
 
 const UNAVAILABLE_SIGNALS = [
@@ -21,7 +23,8 @@ const UNAVAILABLE_SIGNALS = [
   "fetch failed",
 ];
 
-function isGeminiUnavailable(error: unknown): boolean {
+/** Shared by the initial probe here and by generation/worker.ts's retry loop. */
+export function isProviderUnavailable(error: unknown): boolean {
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
   return UNAVAILABLE_SIGNALS.some((needle) => message.includes(needle));
 }
@@ -42,9 +45,9 @@ export async function selectChatModel(env: Env): Promise<SelectedModel> {
   try {
     await gemini.invoke([new HumanMessage("Reply with OK.")]);
     logSuccess("Gemini Initialized");
-    return { model: gemini, providerLabel: "Gemini 2.5" };
+    return { model: gemini, providerLabel: "Gemini 2.5", provider: "Gemini", modelName: "gemini-2.5-flash" };
   } catch (error) {
-    if (!isGeminiUnavailable(error)) {
+    if (!isProviderUnavailable(error)) {
       throw error;
     }
     logWarn("Gemini unavailable");
@@ -58,5 +61,10 @@ async function connectToOllama(env: Env): Promise<SelectedModel> {
   await ollama.invoke([new HumanMessage("Reply with OK.")]);
   logSuccess("Ollama Connected");
   logInfo(`Using ${env.OLLAMA_CHAT_MODEL}`);
-  return { model: ollama, providerLabel: `Ollama ${env.OLLAMA_CHAT_MODEL}` };
+  return {
+    model: ollama,
+    providerLabel: `Ollama ${env.OLLAMA_CHAT_MODEL}`,
+    provider: "Ollama",
+    modelName: env.OLLAMA_CHAT_MODEL,
+  };
 }

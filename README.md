@@ -335,6 +335,25 @@ the SDK's default `GOOGLE_API_KEY` env lookup.
   prompt completes; if you removed that, an open `pg.Pool` will keep the
   event loop alive.
 
+## Sprint S2 — Question Generation Pipeline (`src/generation/`)
+
+Turns Sprint S1's verified connectivity into an actual resumable
+question-generation run against `test_series_db`: resolves real subject/
+category/chapter/topic IDs into `storage/initial.json`, then a
+scheduler/worker pair traverses category→chapter→topic, generates batches
+concurrently (Gemini with an Ollama fallback), validates and logs everything,
+and persists progress after every successful batch so a crash resumes
+instead of restarting.
+
+```bash
+npm run prepare-config          # one-time/idempotent: resolve DB ids, hydrate progress fields
+npm run generate -- --max-batches=1   # generate a bounded number of batches
+```
+
+Full architecture, data flow, decisions, and open gaps (no duplicate
+detection yet, no DB insertion of generated questions yet) are in
+[`docs/sprint-s2-output.md`](docs/sprint-s2-output.md).
+
 ## Future Improvements
 
 - Add a semantic cache backend in `ai/cache/` once real usage patterns justify
