@@ -1,9 +1,11 @@
-import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { Env } from "../config/env";
+import { DEFAULT_LIMITS } from "../config/quota";
 import { MODEL_REGISTRY } from "../models/registry";
-import { isProviderUnavailable } from "../models/llm.factory";
+import { classifyError } from "../quota/errors";
+import { estimateTokens } from "../quota/estimate";
+import type { QuotaManager } from "../quota/quota-manager";
 import { generateQuestionBatch } from "./generate-batch";
-import type { BatchContext } from "./prompt-builder";
+import { buildSystemPrompt, buildUserContent, type BatchContext } from "./prompt-builder";
 import type { GeneratedQuestion } from "./question-schema";
 import { logger, type ValidationChecks } from "../logger/logger";
 import type { ExecutionState } from "../state/types";
@@ -14,11 +16,9 @@ export interface WorkerInput {
   workerId: number;
   batchId: string;
   executionId: string;
-  model: BaseChatModel;
-  provider: string;
-  modelName: string;
-  /** Registry ids to fall back to, in order, when the current model is unavailable. */
-  fallbackIds: string[];
+  /** Registry ids to try in priority order — the quota manager picks which one runs. */
+  modelIds: string[];
+  quota: QuotaManager;
   context: BatchContext;
   currentState: ExecutionState;
 }
@@ -59,23 +59,63 @@ function describeError(error: unknown): { type: string; message: string; stack?:
 }
 
 /**
- * Runs one batch to completion: generate -> validate -> log. Retries up to
- * MAX_ATTEMPTS with exponential backoff, walking input.fallbackIds (the rest
- * of LLM_MODELS after the selected one) whenever a retryable provider-
- * unavailable error shows up (docs/QnA-sprint-s2.md items 5 & 6 — the worker
- * stays generic, no scheduling/traversal logic here).
+ * Runs one batch to completion: pick a model via the quota manager, generate,
+ * validate, log. The worker owns NO scheduling/quota policy — it asks
+ * `quota.acquire()` which model may run, records actual token usage on success,
+ * and puts a model into cooldown on 429 (docs/QnA-sprint-s2.md items 5 & 6).
+ * Because the manager is shared across all workers, a 429 one worker hits
+ * cools the model down for the others too — the missing cross-batch capability
+ * the old per-worker fallback walk couldn't provide.
  */
 export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> {
-  let model = input.model;
-  let provider = input.provider;
-  let modelName = input.modelName;
-  const fallbacks = [...input.fallbackIds];
+  const { quota, context, modelIds } = input;
+  const promptText = `${buildSystemPrompt(context)}\n${buildUserContent(context)}`;
+  const estTokens = estimateTokens(promptText, DEFAULT_LIMITS.expectedOutputTokens);
+
+  let previousId: string | null = null;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const lease = quota.acquire(modelIds, estTokens);
+    if (!lease) {
+      // Every model disabled / cooling / out of quota — nothing left to try.
+      logger.error({
+        executionId: input.executionId,
+        workerId: input.workerId,
+        batchId: input.batchId,
+        provider: "-",
+        model: "-",
+        currentState: input.currentState,
+        error: { type: "NoModelAvailable", httpStatus: 429, message: "All models rate-limited or out of quota", retryable: true },
+        attempt,
+        nextRetryAfter: 0,
+        status: "ABANDONED",
+      });
+      return { batchId: input.batchId, success: false, questions: [] };
+    }
+
+    const { provider, modelName, model } = MODEL_REGISTRY[lease.id]!(input.env);
+
+    // A different model than last attempt means the quota manager routed us to
+    // a fallback (previous one cooled down / hit a limit).
+    if (previousId && previousId !== lease.id) {
+      quota.markFallback(lease.id);
+      logger.provider({
+        executionId: input.executionId,
+        currentState: input.currentState,
+        from: { provider: previousId, model: previousId },
+        to: { provider, model: modelName },
+        reason: "Quota/cooldown failover",
+        batchId: input.batchId,
+      });
+    }
+    previousId = lease.id;
+
     try {
       const startedAt = Date.now();
-      const questions = await generateQuestionBatch(model, input.context);
+      const { questions, usage } = await generateQuestionBatch(model, context);
       const latencyMs = Date.now() - startedAt;
+
+      quota.record(lease, usage, latencyMs);
 
       logger.api({
         executionId: input.executionId,
@@ -84,21 +124,21 @@ export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> 
         provider,
         model: modelName,
         requestId: generateId("REQ"),
-        category: input.context.categoryName,
-        chapter: input.context.chapterName,
-        topic: input.context.topicName,
-        promptTokens: 0,
-        completionTokens: 0,
-        totalTokens: 0,
+        category: context.categoryName,
+        chapter: context.chapterName,
+        topic: context.topicName,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        totalTokens: usage.totalTokens,
         latencyMs,
         httpStatus: 200,
-        questionsRequested: input.context.questionNumber,
+        questionsRequested: context.questionNumber,
         questionsReceived: questions.length,
         cost: 0,
         status: "SUCCESS",
       });
 
-      const { checks, passed } = validateBatch(questions, input.context);
+      const { checks, passed } = validateBatch(questions, context);
       logger.validation({
         executionId: input.executionId,
         questionId: generateId("Q"),
@@ -111,9 +151,22 @@ export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> 
 
       return { batchId: input.batchId, success: true, questions };
     } catch (error) {
-      const retryable = isProviderUnavailable(error);
-      const nextRetryAfter = 2 ** attempt * 1000;
+      const classified = classifyError(error);
+      const described = describeError(error);
       const isFinalAttempt = attempt >= MAX_ATTEMPTS;
+
+      // Cool down ANY retryable error, not just 429 — that's how "retry a 500 a
+      // few times, then move to the next model" works: the cooled model is
+      // skipped on the next acquire(), which routes to the next model. 429 uses
+      // Retry-After/backoff; transient 5xx/network get a short cooldown so a
+      // healthy model isn't sidelined for long. Non-retryables fail fast.
+      let cooldownMs = 0;
+      if (classified.retryable) {
+        const err = classified.rateLimited ? classified : { ...classified, retryAfterMs: 2 ** attempt * 1000 };
+        cooldownMs = quota.cooldown(lease.id, err);
+      } else {
+        quota.failure(lease.id, described.message);
+      }
 
       logger.error({
         executionId: input.executionId,
@@ -122,49 +175,36 @@ export async function runBatchWorker(input: WorkerInput): Promise<WorkerResult> 
         provider,
         model: modelName,
         currentState: input.currentState,
-        error: { ...describeError(error), httpStatus: 0, retryable },
+        error: { ...described, httpStatus: classified.httpStatus, retryable: classified.retryable },
         attempt,
-        nextRetryAfter,
+        nextRetryAfter: cooldownMs,
         status: isFinalAttempt ? "FAILED" : "RETRYING",
       });
 
+      // Non-retryable (400/401/403/404/validation) — retrying won't help.
+      if (!classified.retryable) {
+        return { batchId: input.batchId, success: false, questions: [] };
+      }
       if (isFinalAttempt) {
         return { batchId: input.batchId, success: false, questions: [] };
       }
 
-      // Resolve the next model in the LLM_MODELS chain, skipping any unknown ids.
-      let next: { provider: string; modelName: string; model: BaseChatModel } | undefined;
-      while (retryable && !next && fallbacks.length > 0) {
-        next = MODEL_REGISTRY[fallbacks.shift()!]?.(input.env);
-      }
-
+      quota.markRetry(lease.id);
       logger.retry({
         executionId: input.executionId,
         batchId: input.batchId,
         attempt,
         currentState: input.currentState,
-        reason: retryable ? "Provider unavailable" : describeError(error).message,
-        strategy: "ExponentialBackoff",
-        wait: nextRetryAfter,
+        reason: classified.rateLimited ? "Rate limited" : described.message,
+        strategy: classified.rateLimited ? "Cooldown+Failover" : "Cooldown+Retry",
+        wait: cooldownMs,
         provider,
-        fallback: next !== undefined,
+        fallback: modelIds.length > 1,
       });
 
-      if (next) {
-        logger.provider({
-          executionId: input.executionId,
-          currentState: input.currentState,
-          from: { provider, model: modelName },
-          to: { provider: next.provider, model: next.modelName },
-          reason: "Quota/availability failure",
-          batchId: input.batchId,
-        });
-        model = next.model;
-        provider = next.provider;
-        modelName = next.modelName;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, nextRetryAfter));
+      // No sleep: the cooled-down model is skipped on the next acquire(), so
+      // failover to the next model happens immediately. A single-model config
+      // falls through to a null acquire and abandons.
     }
   }
 

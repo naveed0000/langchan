@@ -1,8 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import type { Env } from "../config/env";
 import { LLM_MODELS } from "../config/llm";
-import { normalizeModelId } from "../models/registry";
-import { selectChatModel } from "../models/llm.factory";
+import { MODEL_REGISTRY, normalizeModelId } from "../models/registry";
+import { JsonQuotaStore, QuotaManager } from "../quota";
 import { createInitialState, readState, writeState } from "../state";
 import { logger } from "../logger/logger";
 import { generateId } from "../utils/ids";
@@ -45,12 +45,15 @@ export async function runGenerationCycle(
   const maxBatches = options.maxBatches ?? Infinity;
 
   const { config } = await prepareInitialConfig(env);
-  const selected = await selectChatModel(env);
 
-  // Everything after the selected model in LLM_MODELS is its fallback chain,
-  // so a mid-batch failure walks the same list the user configured.
-  const chain = LLM_MODELS.map(normalizeModelId);
-  const fallbackIds = chain.slice(chain.indexOf(selected.id) + 1);
+  // Priority-ordered model ids, dropping any that lack a registry factory. The
+  // quota manager — not an upfront probe — decides which one runs each request,
+  // enforcing RPM/TPM/RPD and cooling down models that 429.
+  const modelIds = LLM_MODELS.map(normalizeModelId).filter((id) => MODEL_REGISTRY[id]);
+  if (modelIds.length === 0) throw new Error("No usable LLM in LLM_MODELS (none match the registry)");
+
+  const quota = new QuotaManager(new JsonQuotaStore());
+  await quota.init();
 
   const existingState = await readState();
   const state =
@@ -59,7 +62,7 @@ export async function runGenerationCycle(
       totalQuestions: config.generationconfig.totalquestions,
       totalApiCalls: config.generationconfig.totalapicalls,
       parallelWorkers: 5,
-      provider: { current: selected.provider, model: selected.modelName, fallback: fallbackIds.join(", ") || "none" },
+      provider: { current: modelIds[0]!, model: modelIds[0]!, fallback: modelIds.slice(1).join(", ") || "none" },
     });
   state.status = "RUNNING";
   await writeState(state);
@@ -113,10 +116,8 @@ export async function runGenerationCycle(
         workerId,
         batchId,
         executionId: state.executionId,
-        model: selected.model,
-        provider: selected.provider,
-        modelName: selected.modelName,
-        fallbackIds,
+        modelIds,
+        quota,
         context,
         currentState: state,
       }).then(async (result) => {
@@ -135,6 +136,12 @@ export async function runGenerationCycle(
     });
 
     const results = await Promise.all(tasks);
+
+    // Persist quota once here, in the serial section — never from inside the
+    // concurrent workers (a shared temp file + rename would race). The workers
+    // share one in-memory manager, so cooldowns/counters are already enforced
+    // during the group; this only makes them durable across restarts.
+    await quota.persist();
 
     for (const result of results) {
       batchesAttempted++;
@@ -176,6 +183,14 @@ export async function runGenerationCycle(
   state.status = planCompleted ? "COMPLETED" : "PAUSED";
   state.updatedAt = new Date().toISOString();
   await writeState(state);
+  await quota.persist();
+
+  for (const m of quota.metrics()) {
+    logger.info(
+      `Quota ${m.id}: ${m.health} · req ${m.requests} · success ${(m.successRate * 100).toFixed(0)}% · ` +
+        `rpm ${m.remainingRpm} tpm ${m.remainingTpm} rpd ${m.remainingRpd} · 429×${m.rateLimitCount} fallback×${m.fallbackCount}`,
+    );
+  }
 
   return { batchesAttempted, batchesSucceeded, questionsGenerated, planCompleted };
 }
