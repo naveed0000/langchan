@@ -362,3 +362,87 @@ detection yet, no DB insertion of generated questions yet) are in
   them.
 - Add a hybrid (lexical + vector) retriever in `ai/retrievers/` if pure
   similarity search proves insufficient for exam-terminology queries.
+
+```
+langchan
+├─ .claude
+│  ├─ settings.json
+│  └─ settings.local.json
+├─ docker-compose.yml
+├─ docs
+│  ├─ central-logger.md
+│  ├─ database
+│  │  └─ test-series-db.md
+│  ├─ planning-sprint-s3
+│  │  ├─ mathml.md
+│  │  ├─ prompt.md
+│  │  └─ question.md
+│  ├─ project-structure.md
+│  ├─ QnA-sprint-s2.md
+│  ├─ sprint-output
+│  ├─ sprint-s1-llm-db-connection.md
+│  ├─ sprint-s1-output.md
+│  ├─ sprint-s2-discussion-replace-ids-build-iteratable-object-for-llm.md
+│  ├─ sprint-s2-output.md
+│  ├─ sprint-s2-ratelimit-output.md
+│  └─ sprint-s2-ratelimit.md
+├─ package-lock.json
+├─ package.json
+├─ ponytail-audit.md
+├─ README.md
+├─ review-sprint-s2.md
+├─ src
+│  ├─ app
+│  │  ├─ bootstrap.ts
+│  │  ├─ generate.ts
+│  │  └─ main.ts
+│  ├─ config
+│  │  ├─ env.ts
+│  │  ├─ llm.ts
+│  │  └─ quota.ts
+│  ├─ database
+│  │  ├─ postgres.ts
+│  │  └─ taxonomy.ts
+│  ├─ embeddings
+│  │  └─ embedding.ts
+│  ├─ generation
+│  │  ├─ config-store.ts
+│  │  ├─ generate-batch.ts
+│  │  ├─ index.ts
+│  │  ├─ prepare-config.ts
+│  │  ├─ prompt-builder.ts
+│  │  ├─ question-schema.ts
+│  │  ├─ scheduler.ts
+│  │  ├─ traversal.ts
+│  │  ├─ types.ts
+│  │  ├─ worker.test.ts
+│  │  └─ worker.ts
+│  ├─ logger
+│  │  └─ logger.ts
+│  ├─ models
+│  │  ├─ gemini.ts
+│  │  ├─ llm.factory.ts
+│  │  ├─ ollama.ts
+│  │  ├─ openai.ts
+│  │  └─ registry.ts
+│  ├─ quota
+│  │  ├─ errors.ts
+│  │  ├─ estimate.ts
+│  │  ├─ index.ts
+│  │  ├─ quota-manager.test.ts
+│  │  ├─ quota-manager.ts
+│  │  ├─ store.ts
+│  │  └─ types.ts
+│  ├─ services
+│  │  └─ prompt.service.ts
+│  ├─ state
+│  │  ├─ index.ts
+│  │  ├─ state.store.ts
+│  │  └─ types.ts
+│  └─ utils
+│     └─ ids.ts
+├─ tests
+├─ tsconfig.json
+└─ vitest.config.ts
+
+```
